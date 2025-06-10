@@ -1,0 +1,210 @@
+---
+## `.cursorrule`: Python OOP 桌面應用開發專業流程 (v1.5 - TW) - 模組化結構
+---
+
+這份規則文件採用模組化結構，旨在為使用 Cursor 進行 Python 物件導向桌面應用程式開發提供一個標準化、專業化且易於維護的工作流程指南，其核心是作為 AI 開發輔助的技術性 `README.md` 文件。
+
+---
+### 1. 元數據 (Metadata)
+---
+* **名稱 (Name):** Python OOP Desktop App Dev - Modular Workflow (TW)
+* **版本 (Version):** 1.5
+* **描述 (Description):** 一套專為 AI 輔助開發 Python 物件導向桌面應用設計的模組化規則。包含核心能力、工作流程、指令介面、通用規則及技術文檔定義。強調需求定義、TDD、狀態追蹤與技術細節記錄，並細化問題解決原則。
+* **語言 (Language):** zh-TW (Traditional Chinese - Taiwan) - 詳見 `[GeneralRules]`。
+
+---
+### 2. README 技術文檔定義 (README Definition)
+---
+* **目的:** 定義 `README.md` 作為 AI 開發輔助的核心技術文檔格式與內容要求。
+* **核心區塊 (使用繁體中文):**
+    1.  `# [專案名稱]`
+    2.  `## 專案概觀`
+        * 簡述專案目標、解決的問題、目標使用者。
+    3.  `## 技術棧`
+        * 列出主要語言、框架、重要函式庫。
+    4.  `## 功能開發狀態追蹤表` (**核心表格**)
+        * Markdown 表格，欄位：
+            | 功能或模組名稱 (Name) | 狀態 (Status) | 用途 (Purpose) | 核心功能 (Core Functionality) | 技術實現 (Technical Implementation) | 用戶流程(導航) (User Flow/Navigation) | 建議文件路徑 (Suggested File Path) |
+            |---|---|---|---|---|---|---|
+            | (範例) 使用者認證模組 | 待辦/進行中/已完成/已測試 | 功能業務價值 | 關鍵能力列表 | 技術/模式摘要 | UI互動路徑 | e.g., `src/auth/user_auth.py` |
+    5.  `## 技術實現細節` (**核心記錄區**)
+        * **目的:** 開發中記錄各功能詳細技術資訊。
+        * **格式:** 使用 `### [功能模組/特性名稱] 詳細設計` 子標題。
+        * **內容:** 類別設計、函數邏輯、演算法、API、數據模型、庫用法、問題筆記等。
+    6.  `## 測試案例摘要`
+        * **目的:** 記錄測試涵蓋範圍。
+        * **內容:** 功能測試完成後，條列說明測試案例與目的。
+
+---
+### 3. 核心能力 (Core Capabilities)
+---
+此區塊定義 AI 需要具備的基礎「技能」或原子操作。
+
+#### 3.1. `UnderstandRequirements`
+* **描述:** 理解使用者關於專案目標、核心功能、目標使用者、技術限制等需求的能力。
+* **輸入:** 使用者的自然語言描述。
+* **輸出:** 結構化的需求摘要（可用於填充 README）。
+* **應用:** `[NewProject_Initialization]` 工作流程。
+
+#### 3.2. `DefineREADMEStructure`
+* **描述:** 根據 `[README Definition]` 區塊的規範，生成或驗證 `README.md` 文件的結構和內容框架。
+* **輸入:** (可選) 需求摘要 (`UnderstandRequirements` 的輸出)。
+* **輸出:** 符合規範的 `README.md` 文件內容或結構驗證結果。
+* **應用:** `[NewProject_Initialization]` 工作流程, `[PerformCodeCheck]` 能力 (用於一致性檢查)。
+
+#### 3.3. `GenerateCode`
+* **描述:** 根據指定的功能需求、技術細節描述 (`README.md`) 和 TDD 測試案例，生成符合物件導向原則和 `[GeneralRules]` 中程式碼風格的 Python 程式碼（包括 UI 界面、業務邏輯等）。**需遵循 `ProblemSolvingPrinciple` 中的邏輯保持原則。**
+* **輸入:** 功能描述, `README.md` 相關區塊內容, (可選) 測試代碼。
+* **輸出:** Python 程式碼片段或完整文件。
+* **應用:** `[TDD_Cycle]` 工作流程。
+
+#### 3.4. `GenerateUnitTest`
+* **描述:** 根據指定的功能需求 (`核心功能`, `用途`)，為其生成符合 `[GeneralRules]` 中測試策略的單元測試代碼 (優先使用 pytest)。
+* **輸入:** 功能描述 (`README.md` 表格行)。
+* **輸出:** Python 測試代碼 (`tests/` 目錄下)。
+* **應用:** `[TDD_Cycle]` 工作流程, `/測試` 指令。
+
+#### 3.5. `RefactorCode`
+* **描述:** 在不改變外部行為（測試通過）的前提下，根據 `[GeneralRules]` 中的風格和優化原則，改進現有 Python 程式碼的結構、可讀性或效能。**需遵循 `ProblemSolvingPrinciple` 中的邏輯保持原則。**
+* **輸入:** 現有 Python 程式碼, 相關測試代碼。
+* **輸出:** 重構後的 Python 程式碼。
+* **應用:** `[TDD_Cycle]` 工作流程。
+
+#### 3.6. `UpdateDocumentation`
+* **描述:** 更新 `README.md` 技術文檔的相關部分，包括：
+    * 更新 `功能開發狀態追蹤表` 中的狀態。
+    * 在 `技術實現細節` 中記錄或更新實現細節。
+    * 在 `測試案例摘要` 中添加測試覆蓋說明。
+    * 為程式碼添加或更新 Docstrings。
+* **輸入:** 開發活動的結果 (新代碼、測試結果、狀態變更)。
+* **輸出:** 更新後的 `README.md` 文件內容 / 程式碼文件。
+* **應用:** `[TDD_Cycle]` 工作流程, `[ProblemSolving_Process]` 工作流程。
+
+#### 3.7. `PerformCodeCheck`
+* **描述:** 執行程式碼品質和技術文檔一致性檢查。
+    * 運行 Linter/Formatter (參考 `[GeneralRules]`)。
+    * 檢查 `README.md` 與代碼的一致性 (e.g., `建議文件路徑` vs 文件系統, `已測試` 狀態的功能是否有測試摘要和技術細節記錄)。
+* **輸入:** 專案文件 (Python 程式碼, `README.md`)。
+* **輸出:** 檢查報告 (問題列表)。
+* **應用:** `/檢查` 指令。
+
+#### 3.8. `TroubleshootCode`
+* **描述:** 分析程式碼錯誤、Bug 或非預期行為，並根據 `[GeneralRules]` 中的問題解決原則提出解決方案。**需遵循 `ProblemSolvingPrinciple` 中的邏輯保持和問題導向原則。**
+* **輸入:** 問題描述, 相關程式碼, 錯誤訊息。
+* **輸出:** 問題分析, 潛在原因, 建議的修復代碼。
+* **應用:** `[ProblemSolving_Process]` 工作流程。
+
+#### 3.9. `ManageProjectState`
+* **描述:** 讀取和理解當前專案的狀態，主要依據 `README.md` 技術文檔（特別是 `功能開發狀態追蹤表` 和 `技術實現細節`）以及文件系統結構。能夠識別「進行中」任務和下一個「待辦」任務。
+* **輸入:** 專案文件 (`README.md`, `src/`, `tests/`)。
+* **輸出:** 專案狀態摘要, 下一步行動建議。
+* **應用:** 專案啟動時的狀態檢查, `/繼續` 指令。
+
+#### 3.10. `ManageVersionControl`
+* **描述:** 執行 Git 操作，如 `git add`, `git commit` (遵循 `[GeneralRules]` 的提交訊息格式), `git push`。
+* **輸入:** 需要提交的文件列表, commit message。
+* **輸出:** Git 操作執行結果。
+* **應用:** `[TDD_Cycle]` 工作流程的結尾。
+
+---
+### 4. 工作流程 (Workflows)
+---
+此區塊定義結合多個 `CoreCapabilities` 的標準化開發流程。
+
+#### 4.1. `NewProject_Initialization`
+* **目的:** 初始化一個新的 Python 桌面應用專案。
+* **步驟:**
+    1.  **觸發:** 偵測到新專案且使用者同意初始化。
+    2.  **需求蒐集:** 調用 `[UnderstandRequirements]` 能力與使用者互動。
+    3.  **建立初始文檔:** 調用 `[DefineREADMEStructure]` 能力，利用需求蒐集結果生成初始 `README.md`。
+    4.  **建立基礎結構:** 創建 `src/`, `tests/` 目錄, `.gitignore`, `requirements.txt`。
+    5.  **版本控制建議:** 提示使用者初始化 Git。
+    6.  **完成提示:** 告知使用者初始化完成。
+
+#### 4.2. `TDD_Cycle`
+* **目的:** 遵循 TDD 原則開發單一功能。
+* **輸入:** 要開發的功能名稱 (對應 `README.md` 表格行中的「功能或模組名稱」)。
+* **步驟:**
+    1.  **規劃:** (手動或 AI 輔助) 確認 `README.md` 表格中該功能的 `用途`, `核心功能`, `用戶流程`, `建議文件路徑` 等已填寫。在 `技術實現細節` 建立對應標題 (使用「功能或模組名稱」)。
+    2.  **(Red)** **編寫測試:** 調用 `[GenerateUnitTest]` 為此功能創建失敗的單元測試。
+    3.  **(Green+)** **編寫代碼與記錄:**
+        * 調用 `[GenerateCode]` 編寫剛好讓測試通過的產品代碼。
+        * 調用 `[UpdateDocumentation]` 將實現細節記錄到 `README.md` 的 `技術實現細節` 區塊，並更新表格中的 `技術實現` 摘要。
+    4.  **(Refactor)** **重構:**
+        * (可選) 調用 `[RefactorCode]` 優化代碼。
+        * 確保所有測試通過。
+        * (若有大改動) 調用 `[UpdateDocumentation]` 更新 `技術實現細節`。
+    5.  **最終文件化:**
+        * 調用 `[UpdateDocumentation]` 添加 Docstrings，更新 `README.md` 表格狀態為「已完成」/「已測試」，並在 `測試案例摘要` 中添加說明。
+    6.  **版本控制:** (可選) 調用 `[ManageVersionControl]` 提交變更。
+
+#### 4.3. `ProblemSolving_Process`
+* **目的:** 結構化地解決遇到的問題。
+* **輸入:** 問題描述。
+* **步驟:**
+    1.  **理解與重現:** 與使用者確認問題細節，嘗試理解重現步驟。
+    2.  **分析:** 調用 `[TroubleshootCode]` 分析相關代碼、錯誤訊息，定位問題。
+    3.  **假設與驗證:** (AI 或使用者) 提出假設並設計驗證方法。
+    4.  **修復:** 根據驗證結果，調用 `[GenerateCode]` 或手動修改代碼（嚴格遵循 `ProblemSolvingPrinciple`）。
+    5.  **測試與回歸:** 執行相關測試確認修復，檢查副作用，建議添加新測試。
+    6.  **文件化:** 調用 `[UpdateDocumentation]` 在 `技術實現細節` 或代碼註釋中記錄問題與解決方案。
+    7.  **版本控制:** (可選) 調用 `[ManageVersionControl]` 提交修復。
+
+---
+### 5. 指令介面 (Command Interface)
+---
+此區塊將使用者指令映射到具體的 `Workflows` 或 `CoreCapabilities`。
+
+* **`/開發 [功能或模組名稱]`**
+    * **映射:**
+        * 若提供 `[功能或模組名稱]`: 觸發 `[TDD_Cycle]` 工作流程，以該名稱為輸入。
+        * 若無 `[功能或模組名稱]`: 調用 `[ManageProjectState]` 查找下一個「待辦」任務，確認後觸發 `[TDD_Cycle]`。
+    * **核心交互:** 強調在流程中需更新 `README.md`。
+
+* **`/檢查`**
+    * **映射:** 觸發 `[PerformCodeCheck]` 核心能力。
+    * **核心交互:** 匯報檢查結果。
+
+* **`/測試 [功能或模組名稱]`**
+    * **映射:** 主要觸發 `[GenerateUnitTest]` 核心能力，作為 `[TDD_Cycle]` 的起點。
+    * **核心交互:** 引導創建初始失敗測試。
+
+* **`/問題 [問題描述]`**
+    * **映射:** 觸發 `[ProblemSolving_Process]` 工作流程。
+    * **核心交互:** 引導完成問題解決步驟。
+
+* **`/繼續`**
+    * **映射:** 觸發 `[ManageProjectState]` 核心能力。
+    * **核心交互:** 報告當前狀態並建議下一步（通常是觸發 `/開發`）。
+
+---
+### 6. 通用規則 (General Rules)
+---
+此區塊定義全局性的原則和約束。
+
+* **`Language`**:
+    * `Policy`: `zh-TW` (台灣地區慣用的繁體中文)。
+    * `Scope`: 所有 AI 的回應、`README.md` 內容、代碼註釋（若使用自然語言）。專有名詞可保留原文。
+* **`CodeStyle`**:
+    * `Standard`: PEP 8。
+    * `ToolingRecommendation`: 使用 `black` 格式化, `flake8` 或 `pylint` 檢查。
+* **`TestingPolicy`**:
+    * `FrameworkPreference`: `pytest` > `unittest`。
+    * `Location`: `tests/` 目錄。
+    * `NamingConvention`: `test_*.py` (文件), `test_*` (函數/方法)。
+    * `Granularity`: 模組化, 獨立性。
+    * `DocumentationRequirement`: 完成後需在 `README.md` 的 `測試案例摘要` 中記錄。
+* **`ProblemSolvingPrinciple`**:
+    * **`MinimalChange` (最小變動):**
+        * **說明:** 在修復問題時，應只修改與問題直接相關的最少程式碼。避免不必要的重構或功能擴展，以降低引入新錯誤的風險。目標是精確地解決已識別的問題，而非大規模改動。
+    * **`PreserveLogic` (保持邏輯):**
+        * **約束:** 除非得到使用者明確指示，否則 AI 在修改程式碼（包括修復錯誤或重構）時，**不得**破壞程式原有的核心業務邏輯或語意。修改應集中在技術實現層面，保持功能行為的一致性。
+    * **`FocusOnActualProblem` (問題導向):**
+        * **約束:** AI 提出的解決方案或生成的程式碼，應旨在解決使用者描述的**實際問題或根本原因**，而非僅僅為了通過特定的測試案例。避免「為了測試而編碼」導致的治標不治本。
+    * `OtherPrinciples`: Reproducibility (可重現性), Isolation (問題隔離), Verification (驗證修復)。
+* **`VersionControlPolicy`**:
+    * `CommitMessageFormat`: 建議遵循 Conventional Commits (e.g., `feat: ...`, `fix: ...`, `docs: ...`)。
+    * `Frequency`: 建議在完成一個小功能或修復後提交。
+* **`DevelopmentPrinciple`**:
+    * `Core`: Test-Driven Development (TDD)。
+    * `Documentation`: `README.md` 技術文檔與代碼同步更新。
