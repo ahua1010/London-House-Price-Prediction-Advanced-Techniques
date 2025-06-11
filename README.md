@@ -120,11 +120,23 @@ src/
 2. 安裝依賴：`pip install -r requirements.txt`
 3. 配置環境變數
 
-### 運行方式
-1. 數據處理：`python src/data_processing/process_data.py`
-2. 特徵工程：`python src/feature_engineering/engineer_features.py`
-3. 模型訓練：`python src/model_training/train_model.py`
-4. 模型評估：`python src/evaluation/evaluate_model.py`
+### 注意事項
+1. **GPU 加速**：支援 XGBoost、LightGBM 和 CatBoost 的 GPU 訓練，大幅加快模型訓練速度。
+2. **快速測試模式**：包含 `QUICK_TEST` 標誌，用於快速測試整個流程。啟用後，它將使用原始特徵的精簡子集和更少的交叉驗證次數（2 次而不是 5 次），以確保程式碼在完整執行時間的一小部分內無錯誤運行。
+
+## 運行方法
+1. **運行完整流程**：
+執行主腳本以啟動訓練程序。這將運行完整的 5 倍時間序列交叉驗證。
+```bash
+python src/model_pipeline.py
+```
+訓練好的模型和最終的 `submission.csv` 將保存在 `output/` 目錄下帶有時間戳的子目錄中。
+
+2. **執行快速測試**：
+為了快速驗證整個流程是否正常運作（例如，在進行變更後），您可以啟用「QUICK_TEST」模式。強烈建議您在調試時使用此模式。
+- 開啟“src/model_pipeline.py”。
+- 將“QUICK_TEST = False”更改為“QUICK_TEST = True”。
+- 按照上述方法運行腳本。這將使用較小的特徵集，並且僅進行兩輪交叉驗證，比完整運行更快完成。
 
 ## 注意事項
 1. 確保數據文件放在正確的目錄

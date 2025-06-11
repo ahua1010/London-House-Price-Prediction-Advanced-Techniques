@@ -1,20 +1,12 @@
 import pandas as pd
 import numpy as np
-from sklearn.neighbors import NearestNeighbors
-from sklearn.ensemble import RandomForestRegressor # For specific model-based imputation
 import lightgbm as lgb
-from sklearn.model_selection import KFold
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error
 from tqdm import tqdm
 from sklearn.impute import KNNImputer
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.feature_selection import SelectFromModel
-from sklearn.decomposition import PCA
 import warnings
 warnings.filterwarnings('ignore')
 import xgboost as xgb
-from sklearn.ensemble import ExtraTreesRegressor
 from typing import Tuple
 import catboost as cb
 
@@ -415,7 +407,7 @@ def select_features(
     config: dict,
     k: int = 40,
     use_gpu: bool = False,
-) -> (list, dict):
+) -> Tuple[list, dict]:
     """
     使用三種不同的模型（LGBM、XGBoost、CatBoost）來選擇 top-k 特徵。
     返回三種模型選擇的特徵的聯集。
@@ -446,7 +438,7 @@ def select_features(
         selected_features = X.columns.tolist()
     
     print(f"最終選擇了 {len(selected_features)} 個特徵")
-    print(f"選中的特徵列表: {selected_features}")
+    print(f"選中的特徵列表(前10個): {selected_features[:10]}")
     
     # 保存選中的特徵到配置中
     config['selected_features'] = selected_features
@@ -546,7 +538,7 @@ def handle_missing_values(df: pd.DataFrame, is_train: bool, config: dict) -> pd.
         # 進行多輪迭代插補
         n_iterations = 3  # 設置迭代次數
         for i in range(n_iterations):
-            print(f"--- 插補迭代 [第 {i + 1}/{n_iterations} 輪] ---")
+            print(f"--- 插補迭代 [第 {i + 1}/{n_iterations} 輪] ---", end='\r')
             for col in cols_to_impute:
                 if features[col].isnull().any():
                     # 預測變量為所有其他的數值型欄位
@@ -690,7 +682,17 @@ def create_derived_features(features: pd.DataFrame, is_train: bool, config: dict
         features['sale_month'] = pd.to_numeric(features['sale_month'], errors='coerce')
         features['sin_month'] = np.sin(2 * np.pi * features['sale_month'] / 12)
         features['cos_month'] = np.cos(2 * np.pi * features['sale_month'] / 12)
-        features['months_since_start'] = (features['sale_year'] - features['sale_year'].min()) * 12 + features['sale_month']
+        
+        # --- 修正數據洩漏 ---
+        # 最小年份必須從訓練集中學習，並應用於驗證/測試集
+        if is_train:
+            min_year = features['sale_year'].min()
+            config['min_sale_year'] = min_year
+        else:
+            # 在非訓練模式下，從 config 加載 min_year，提供後備以防萬一
+            min_year = config.get('min_sale_year', features['sale_year'].min())
+
+        features['months_since_start'] = (features['sale_year'] - min_year) * 12 + features['sale_month']
         
         # 季節特徵
         features['season'] = features['sale_month'].apply(lambda x: (x % 12 + 3) // 3)
@@ -712,7 +714,3 @@ def create_derived_features(features: pd.DataFrame, is_train: bool, config: dict
         features['floorAreaSqM_log'] = np.log1p(features['floorAreaSqM'])
 
     return features
-
-def find_feature_combinations(features: pd.DataFrame, target: pd.Series, quick_test: bool = False, config: dict = None) -> (pd.DataFrame, list):
-    # ... existing code ...
-    pass

@@ -7,10 +7,10 @@ from datetime import datetime
 from numba import cuda
 
 # 匯入模型和評估工具
-from sklearn.model_selection import KFold
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_error
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor
-from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.ensemble import ExtraTreesRegressor
+from sklearn.linear_model import Ridge
 import lightgbm as lgb
 import xgboost as xgb
 import catboost as cb
@@ -27,7 +27,7 @@ QUICK_TEST = False # 設定為 True 以快速測試流程，減少折數和特�
 # 匯入特徵工程模組
 from feature_engineering import engineer_features, select_features
 
-def train_and_evaluate_models(X_train, y_train, X_val, y_val, X_test, models, meta_model):
+def train_and_evaluate_models(X_train, y_train, X_val, y_val, X_test, models, meta_model, y_train_orig):
     """
     訓練基模型和元模型，並返回預測結果。
     """
@@ -38,6 +38,14 @@ def train_and_evaluate_models(X_train, y_train, X_val, y_val, X_test, models, me
         print(f"訓練模型: {name}")
         try:
             model.fit(X_train, y_train)
+            
+            # --- ADDED: In-fold MAE calculation ---
+            train_preds_log = model.predict(X_train)
+            train_preds_orig = np.expm1(train_preds_log)
+            in_fold_mae = mean_absolute_error(y_train_orig, train_preds_orig)
+            print(f"    - 折內 MAE: {in_fold_mae:,.2f}")
+            # --- END ADDED ---
+
             oof_preds[name] = model.predict(X_val)
             test_preds[name] = model.predict(X_test)
         except Exception as e:
@@ -64,10 +72,26 @@ def run_time_series_stacking(df, test_df, target_col, models, meta_model, n_spli
     """
     print("\n=== 開始訓練 ===")
     
+    # --- 修正數據洩漏: 按時間排序數據 ---
+    if 'sale_year' in df.columns and 'sale_month' in df.columns:
+        print("-> 正在按時間排序數據以進行時間序列交叉驗證...")
+        df = df.sort_values(['sale_year', 'sale_month']).reset_index()
+
     X = df.drop(columns=[target_col], errors='ignore')
     y = df[target_col]
+
+    # --- 解決 'ID' 鍵錯誤 ---
+    # 將 'ID' 從特徵中移除，並保存以供後續使用
+    if 'ID' in X.columns:
+        original_ids = X['ID']
+        X = X.drop(columns=['ID'])
+    else:
+        # 如果 'ID' 已經是索引，直接使用
+        original_ids = X.index
     
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    # --- 修正數據洩漏: 使用 TimeSeriesSplit ---
+    # kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    kf = TimeSeriesSplit(n_splits=n_splits)
     
     oof_predictions = np.zeros(len(X))
     test_predictions_sum = np.zeros(len(test_df))
@@ -100,7 +124,7 @@ def run_time_series_stacking(df, test_df, target_col, models, meta_model, n_spli
 
         # --- 特徵選擇 (在 Fold 內部進行) ---
         selected_features, config_fold = select_features(
-            X_train_featured, y_train_log_processed, config=config_fold, k=top_k, use_gpu=USE_GPU
+            X_train_featured, y_train_log_processed, config=config_fold, k=top_k, use_gpu=use_gpu
         )
         fold_feature_sets.append(set(selected_features))
         
@@ -119,7 +143,8 @@ def run_time_series_stacking(df, test_df, target_col, models, meta_model, n_spli
             X_train_selected, y_train_log_processed, 
             X_val_selected, y_val_log,
             test_selected, 
-            models, meta_model
+            models, meta_model,
+            y_train_fold # Pass original scale target for in-fold MAE
         )
         
         oof_predictions[val_index] = fold_oof_preds['meta_pred'].values
@@ -133,7 +158,8 @@ def run_time_series_stacking(df, test_df, target_col, models, meta_model, n_spli
     final_oof_mae = np.mean(oof_mae_scores)
     print(f"\nFinal OOF MAE (on original price scale): {final_oof_mae:,.2f}")
     
-    oof_preds_series = pd.Series(oof_predictions, index=X.index)
+    # 使用保存的原始 ID 創建 Series，確保索引正確
+    oof_preds_series = pd.Series(oof_predictions, index=original_ids)
     final_test_preds = test_predictions_sum / n_splits
     
     # --- 訓練最終模型 (在所有數據上) ---
@@ -265,10 +291,7 @@ def main():
     # 執行訓練
     oof_preds, test_preds, final_config = run_time_series_stacking(
         train_df, test_df, 'price', models, meta_model, 
-        n_splits=n_splits,
-        top_k=40, 
-        use_gpu=USE_GPU,
-        quick_test=QUICK_TEST
+        n_splits=n_splits, use_gpu=USE_GPU, quick_test=QUICK_TEST
     )
     
     # 儲存結果

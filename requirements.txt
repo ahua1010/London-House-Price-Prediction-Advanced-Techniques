@@ -8,4 +8,12 @@ joblib>=1.1
 matplotlib
 seaborn
 tqdm 
-# jupyterlab # For notebooks EDA 
+numba
+
+
+
+
+
+
+
+
