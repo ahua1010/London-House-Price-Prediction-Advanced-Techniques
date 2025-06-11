@@ -16,6 +16,7 @@ warnings.filterwarnings('ignore')
 import xgboost as xgb
 from sklearn.ensemble import ExtraTreesRegressor
 from typing import Tuple
+import catboost as cb
 
 # --- HELPER FUNCTION (Provided by you) ---
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -159,7 +160,7 @@ def impute_feature_with_lgbm(
 
     if is_train:
         # 更新 print 語句以顯示使用的特徵總數
-        print(f"訓練 LGBM 插補模型於: {col_to_impute} (使用 {len(final_imputation_predictors)} 個特徵)...")
+        # print(f"訓練 LGBM 插補模型於: {col_to_impute} (使用 {len(final_imputation_predictors)} 個特徵)...")
         train_data_for_imputer = df_for_imputation_model[~missing_mask]
         
         # 移除提前的 NaN 檢查，確保流程總是嘗試訓練模型
@@ -226,120 +227,223 @@ def impute_feature_with_lgbm(
         
     return df_processed
 
-def better_features(train, test, target, columns):
+def better_features(features, target_series, is_train, config, columns_to_combine=None, quick_test=False):
     """
-    自動搜索算術組合特徵
-    使用交叉驗證評估每個組合特徵的效果，只保留最有價值的組合
-    使用 pd.concat 一次性合併所有新特徵以提高效能
+    自動化生成和篩選算術組合特徵。
+    - 訓練模式 (is_train=True): 探索新特徵，評估其與目標的相關性及與現有特徵的冗餘性，
+      並將有效的特徵組合儲存到 config 中。
+    - 推論模式 (is_train=False): 從 config 中讀取已儲存的特徵組合，並應用到數據集上。
     """
-    print("開始自動搜索算術組合特徵...")
-    
-    # 創建臨時數據框來存儲新特徵
-    new_features_train = pd.DataFrame(index=train.index)
-    new_features_test = pd.DataFrame(index=test.index)
-    
-    # 生成所有可能的算術組合
-    new_features = []
-    for i, col1 in enumerate(columns):
-        for col2 in columns[i+1:]:
-            # 生成四種算術組合
-            for op in ['*', '/', '-', '+']:
-                try:
-                    # 在臨時數據框中計算新特徵
-                    new_col = f'{col1}{op}{col2}'
-                    if op == '*':
-                        new_features_train[new_col] = train[col1] * train[col2]
-                        new_features_test[new_col] = test[col1] * test[col2]
-                    elif op == '/':
-                        new_features_train[new_col] = train[col1] / (train[col2] + 1e-9)
-                        new_features_test[new_col] = test[col1] / (test[col2] + 1e-9)
-                    elif op == '-':
-                        new_features_train[new_col] = train[col1] - train[col2]
-                        new_features_test[new_col] = test[col1] - test[col2]
-                    else:  # '+'
-                        new_features_train[new_col] = train[col1] + train[col2]
-                        new_features_test[new_col] = test[col1] + test[col2]
-                    
-                    # 計算新特徵與目標變量的相關性
-                    correlation = abs(new_features_train[new_col].corr(target))
-                    
-                    # 降低相關性閾值，並檢查特徵的有效性
-                    if correlation > 0.05 and not new_features_train[new_col].isna().any():
-                        # 檢查與現有特徵的相關性
-                        max_corr = 0
-                        for col in train.columns:
-                            if col != new_col:
-                                corr = abs(new_features_train[new_col].corr(train[col]))
-                                max_corr = max(max_corr, corr)
-                        
-                        # 如果與現有特徵的相關性不高，則保留
-                        if max_corr < 0.95:  # 降低相關性閾值
-                            new_features.append(new_col)
-                            print(f"保留組合特徵: {new_col} (相關性: {correlation:.4f})")
-                except Exception as e:
-                    print(f"警告：評估組合特徵 {col1}{op}{col2} 時出錯 - {str(e)}")
-                    continue
-    
-    # 一次性合併所有新特徵
-    if new_features:
-        train = pd.concat([train, new_features_train[new_features]], axis=1)
-        test = pd.concat([test, new_features_test[new_features]], axis=1)
-        print(f"特徵組合完成，共生成 {len(new_features)} 個新特徵。")
-    else:
-        print("特徵組合完成，沒有生成新特徵。")
-    
-    return train, test
+    print("-> 執行特徵組合...")
 
-def select_features(features, target=None, config=None):
+    if quick_test:
+        print("    啟用快速測試模式，僅使用少量核心特徵進行組合。")
+        core_features_for_combination = ['floorAreaSqM', 'total_rooms', 'lat_lon_ratio']
+        features_to_use = [f for f in core_features_for_combination if f in features.columns]
+    else:
+        features_to_use = features.select_dtypes(include=np.number).columns.tolist()
+
+    if len(features_to_use) < 2:
+        print("    可用於組合的特徵少於2個，跳過此步驟。")
+        return features, config
+
+    if is_train:
+        if target_series is None:
+            print("    在訓練模式下未提供目標變數，跳過特徵組合。")
+            return features, config
+
+        # --- 使用 NumPy 進行向量化計算以大幅提高性能 ---
+        print("    初始化 NumPy 矩陣以加速相關性計算...")
+        
+        target_vector = target_series.values
+        target_vector_norm = (target_vector - np.mean(target_vector)) / np.std(target_vector)
+
+        existing_features_matrix = features[features_to_use].values
+        
+        mean_existing = np.mean(existing_features_matrix, axis=0)
+        std_existing = np.std(existing_features_matrix, axis=0)
+        std_existing[std_existing == 0] = 1
+        normalized_existing_matrix = (existing_features_matrix - mean_existing) / std_existing
+        
+        n_rows = len(target_vector)
+        new_combinations_list = [] 
+
+        print("    正在搜索最佳算術組合 (使用向量化)...")
+        
+        for i in tqdm(range(len(features_to_use)), desc="    組合特徵搜索", leave=False):
+            for j in range(i, len(features_to_use)):
+                col1 = features_to_use[i]
+                col2 = features_to_use[j]
+
+                for op in ['*', '/', '-', '+']:
+                    if col1 == col2 and op in ['-']: continue
+                    if i > j and op in ['+', '*']: continue
+
+                    new_feature_name = f'{col1}_{op}_{col2}'
+                    
+                    if op == '+': new_feature_series = features[col1] + features[col2]
+                    elif op == '-': new_feature_series = features[col1] - features[col2]
+                    elif op == '*': new_feature_series = features[col1] * features[col2]
+                    elif op == '/': new_feature_series = features[col1] / (features[col2] + 1e-9)
+                    
+                    if new_feature_series.isnull().any() or np.isinf(new_feature_series).any():
+                        continue
+
+                    # --- 高效的向量化相關性檢查 ---
+                    new_feature_vector = new_feature_series.values
+                    
+                    mean_new = np.mean(new_feature_vector)
+                    std_new = np.std(new_feature_vector)
+                    if std_new < 1e-9: continue
+                    
+                    new_feature_norm = (new_feature_vector - mean_new) / std_new
+                    correlation_with_target = np.dot(target_vector_norm, new_feature_norm) / n_rows
+                    
+                    if abs(correlation_with_target) < 0.05:
+                        continue
+
+                    correlations_with_existing = np.dot(new_feature_norm, normalized_existing_matrix) / n_rows
+                    if np.max(np.abs(correlations_with_existing)) > 0.95:
+                        continue
+                    
+                    features[new_feature_name] = new_feature_series
+                    normalized_existing_matrix = np.c_[normalized_existing_matrix, new_feature_norm]
+                    new_combinations_list.append((col1, col2, op))
+        
+        # 修正後的打印語句
+        print(f"\n    發現 {len(new_combinations_list)} 個新組合特徵。")
+        config['better_features_list'] = new_combinations_list
+        return features, config
+
+    else: # is_train == False
+        if 'better_features_list' not in config or not config['better_features_list']:
+            print("    在非訓練模式下，未找到已儲存的特徵組合，跳過此步驟。")
+            return features, config
+        
+        combinations = config['better_features_list']
+        print(f"    應用 {len(combinations)} 個已儲存的特徵組合。")
+        for col1, col2, op in combinations:
+            new_col_name = f'{col1}_{op}_{col2}'
+            if op == '+': features[new_col_name] = features[col1] + features[col2]
+            elif op == '-': features[new_col_name] = features[col1] - features[col2]
+            elif op == '*': features[new_col_name] = features[col1] * features[col2]
+            elif op == '/': features[new_col_name] = features[col1] / (features[col2] + 1e-9)
+        
+        return features, config
+
+def select_features_with_lgbm(features, target, k, use_gpu=False):
+    """使用 LightGBM 選擇 top-k 特徵，支援 GPU"""
+    params = {'random_state': 42, 'n_jobs': -1}
+    if use_gpu:
+        try:
+            params['device'] = 'gpu'
+            lgbm = lgb.LGBMRegressor(**params)
+            lgbm.fit(features, target)
+            print("LGBM feature selection running on GPU.")
+        except Exception as e:
+            print(f"LGBM on GPU failed ({e}), falling back to CPU.")
+            params.pop('device')
+            lgbm = lgb.LGBMRegressor(**params)
+            lgbm.fit(features, target)
+    else:
+        lgbm = lgb.LGBMRegressor(**params)
+        lgbm.fit(features, target)
+    
+    feature_importance_df = pd.DataFrame({
+        'feature': features.columns,
+        'importance': lgbm.feature_importances_
+    }).sort_values('importance', ascending=False)
+    return feature_importance_df.head(k)['feature'].tolist()
+
+def select_features_with_xgb(features, target, k, use_gpu=False):
+    """使用 XGBoost 選擇 top-k 特徵，支援 GPU"""
+    params = {'random_state': 42, 'n_jobs': -1}
+    # 確保特徵名稱不包含 XGBoost 不支援的字符
+    safe_features = features.rename(columns = lambda x: x.replace('[', '').replace(']', '').replace('<', ''))
+    
+    if use_gpu:
+        try:
+            params['tree_method'] = 'gpu_hist'
+            xgb_model = xgb.XGBRegressor(**params)
+            xgb_model.fit(safe_features, target)
+            print("XGB feature selection running on GPU.")
+        except Exception as e:
+            print(f"XGB on GPU failed ({e}), falling back to CPU.")
+            params.pop('tree_method')
+            xgb_model = xgb.XGBRegressor(**params)
+            xgb_model.fit(safe_features, target)
+    else:
+        xgb_model = xgb.XGBRegressor(**params)
+        xgb_model.fit(safe_features, target)
+
+    feature_importance_df = pd.DataFrame({
+        'feature': safe_features.columns,
+        'importance': xgb_model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    # 將安全名稱映射回原始名稱
+    top_k_safe_cols = feature_importance_df.head(k)['feature'].tolist()
+    return [features.columns[safe_features.columns.get_loc(col)] for col in top_k_safe_cols]
+
+def select_features_with_cat(features, target, k, use_gpu=False):
+    """使用 CatBoost 選擇 top-k 特徵，支援 GPU"""
+    params = {'random_state': 42, 'verbose': 0}
+    if use_gpu:
+        try:
+            params['task_type'] = 'GPU'
+            cat_model = cb.CatBoostRegressor(**params)
+            cat_model.fit(features, target)
+            print("CatBoost feature selection running on GPU.")
+        except Exception as e:
+            print(f"CatBoost on GPU failed ({e}), falling back to CPU.")
+            params.pop('task_type')
+            cat_model = cb.CatBoostRegressor(**params)
+            cat_model.fit(features, target)
+    else:
+        cat_model = cb.CatBoostRegressor(**params)
+        cat_model.fit(features, target)
+
+    feature_importance_df = pd.DataFrame({
+        'feature': features.columns,
+        'importance': cat_model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    return feature_importance_df.head(k)['feature'].tolist()
+
+def select_features(
+    X: pd.DataFrame, 
+    y: pd.Series, 
+    config: dict,
+    k: int = 40,
+    use_gpu: bool = False,
+) -> (list, dict):
     """
-    使用多個模型自動選擇重要特徵
-    
-    Args:
-        features: 特徵 DataFrame
-        target: 目標變量 Series
-        config: 配置字典
-    
-    Returns:
-        選中的特徵列表
+    使用三種不同的模型（LGBM、XGBoost、CatBoost）來選擇 top-k 特徵。
+    返回三種模型選擇的特徵的聯集。
     """
-    if config is None:
-        config = {}
-    
-    # 如果沒有目標變量，返回所有特徵
-    if target is None:
-        print("沒有目標變量，返回所有特徵")
-        return features.columns.tolist()
-    
-    # 移除目標變量
-    if target.name in features.columns:
-        features = features.drop(columns=[target.name])
-    
-    # 使用 LightGBM 選擇特徵
-    lgb_features = select_features_with_lgbm(features, target)
-    print(f"LGB 選擇了 {len(lgb_features)} 個特徵")
-    
-    # 使用 XGBoost 選擇特徵
-    try:
-        xgb_features = select_features_with_xgb(features, target)
-        print(f"XGB 選擇了 {len(xgb_features)} 個特徵")
-    except Exception as e:
-        print(f"使用 XGB 計算特徵重要性時出錯: {str(e)}")
-        xgb_features = []
-    
-    # 使用 ExtraTrees 選擇特徵
-    try:
-        etr_features = select_features_with_etr(features, target)
-        print(f"ETR 選擇了 {len(etr_features)} 個特徵")
-    except Exception as e:
-        print(f"使用 ETR 計算特徵重要性時出錯: {str(e)}")
-        etr_features = []
-    
+    print(f"\n=== 預處理步驟 2: 預先執行特徵選擇 ===")
+
+    # 如果總特徵數小於等於 k，則直接返回所有特徵，無需選擇
+    if X.shape[1] <= k:
+        print(f"特徵總數 ({X.shape[1]}) 小於等於 k ({k})，跳過特徵選擇。")
+        selected_features = X.columns.tolist()
+        config['selected_features'] = selected_features
+        return selected_features, config
+
+    lgb_features = select_features_with_lgbm(X.copy(), y, k, use_gpu)
+    print(f"LGB 選擇了 {len(lgb_features)} 個 top-{k} 特徵")
+
+    xgb_features = select_features_with_xgb(X.copy(), y, k, use_gpu)
+    print(f"XGB 選擇了 {len(xgb_features)} 個 top-{k} 特徵")
+
+    cat_features = select_features_with_cat(X.copy(), y, k, use_gpu)
+    print(f"CatBoost 選擇了 {len(cat_features)} 個 top-{k} 特徵")
+
     # 合併所有選中的特徵
-    selected_features = list(set(lgb_features + xgb_features + etr_features))
+    selected_features = list(set(lgb_features + xgb_features + cat_features))
     
     # 如果沒有選中任何特徵，使用所有特徵
     if not selected_features:
-        selected_features = features.columns.tolist()
+        selected_features = X.columns.tolist()
     
     print(f"最終選擇了 {len(selected_features)} 個特徵")
     print(f"選中的特徵列表: {selected_features}")
@@ -347,7 +451,7 @@ def select_features(features, target=None, config=None):
     # 保存選中的特徵到配置中
     config['selected_features'] = selected_features
     
-    return selected_features
+    return selected_features, config
 
 def scale_features(df, is_train=True, config=None):
     """
@@ -498,17 +602,18 @@ def process_categorical_features(df: pd.DataFrame, is_train: bool, config: dict)
     
     return features
 
-def engineer_features(features, config=None, is_train=True):
+def engineer_features(features: pd.DataFrame, is_train: bool, config: dict, quick_test: bool = False):
     """
-    對數據集進行特徵工程
+    對給定的 DataFrame 執行完整的特徵工程流程。
     
     Args:
         features: 包含特徵的 DataFrame
-        config: 用於存儲/加載狀態的配置字典
         is_train: 布林值，指示是否為訓練模式
-        
+        config: 用於存儲/加載狀態的配置字典
+        quick_test: 布林值，指示是否啟用快速測試模式
+    
     Returns:
-        處理後的 DataFrame
+        處理後的 DataFrame 和 target_series (如果是在訓練模式)
     """
     if config is None:
         config = {}
@@ -538,6 +643,10 @@ def engineer_features(features, config=None, is_train=True):
     features = handle_missing_values(features, is_train=is_train, config=config)
     print(f"-> 缺失值處理後數量: {features.shape[1]}")
     
+    # 執行自動化特徵組合
+    features, config = better_features(features, target_series=target_series, is_train=is_train, config=config, quick_test=quick_test)
+    print(f"-> 特徵組合後數量: {features.shape[1]}")
+
     # 正確處理 scale_features 的返回
     features, config = scale_features(features, is_train=is_train, config=config)
     print(f"-> 特徵縮放後數量: {features.shape[1]}")
@@ -548,53 +657,62 @@ def engineer_features(features, config=None, is_train=True):
     
     # 在所有特徵工程完成後，如果是在訓練模式，則將處理過的 target 加回去
     if is_train and target_series is not None:
-        features['price'] = target_series
-
-    return features
-
-def create_derived_features(df: pd.DataFrame, is_train: bool, config: dict) -> pd.DataFrame:
-    """
-    Create derived features from the input DataFrame.
+        # features[config.get('target_col', 'price')] = target_series
+        return features, target_series, config
     
-    Args:
-        df: Input DataFrame
-        is_train: Whether this is training data
-        config: Configuration dictionary
+    # 對於 is_train=False 的情況，也返回三個值以保持一致性
+    return features, None, config
+
+def create_derived_features(features: pd.DataFrame, is_train: bool, config: dict) -> pd.DataFrame:
+    """創建衍生特徵"""
+    
+    # --- 房間相關特徵 ---
+    room_cols = ['bathrooms', 'bedrooms', 'livingRooms']
+    if all(col in features.columns for col in room_cols):
+        features['total_rooms'] = features[room_cols].sum(axis=1)
+        if 'floorAreaSqM' in features.columns and features['floorAreaSqM'].notna().any():
+             # 避免除以零
+            features['rooms_per_area'] = features['total_rooms'] / (features['floorAreaSqM'] + 1e-6)
         
-    Returns:
-        DataFrame with derived features
-    """
-    features = df.copy()
+        # 避免除以零
+        features['bathrooms_ratio'] = features['bathrooms'] / (features['total_rooms'] + 1e-6)
+        features['bedrooms_ratio'] = features['bedrooms'] / (features['total_rooms'] + 1e-6)
+        features['livingRooms_ratio'] = features['livingRooms'] / (features['total_rooms'] + 1e-6)
+
+    # --- 地理位置特徵 ---
+    geo_cols = ['latitude', 'longitude']
+    if all(col in features.columns for col in geo_cols):
+        features['lat_lon_ratio'] = features['latitude'] / (features['longitude'] + 1e-9)
+        features['lat_lon_product'] = features['latitude'] * features['longitude']
+
+    # --- 時間相關特徵 ---
+    if 'sale_month' in features.columns:
+        features['sale_month'] = pd.to_numeric(features['sale_month'], errors='coerce')
+        features['sin_month'] = np.sin(2 * np.pi * features['sale_month'] / 12)
+        features['cos_month'] = np.cos(2 * np.pi * features['sale_month'] / 12)
+        features['months_since_start'] = (features['sale_year'] - features['sale_year'].min()) * 12 + features['sale_month']
+        
+        # 季節特徵
+        features['season'] = features['sale_month'].apply(lambda x: (x % 12 + 3) // 3)
+        features['is_spring'] = (features['season'] == 1).astype(int)
+        features['is_summer'] = (features['season'] == 2).astype(int)
+
+    # --- 為關鍵欄位的缺失值創建指示符特徵 ---
+    # 定義我們關心是否缺失的欄位列表
+    cols_to_check_missing = ['bathrooms', 'bedrooms', 'livingRooms', 'floorAreaSqM']
     
-    # 計算總房間數
-    features['total_rooms'] = features[['bathrooms', 'bedrooms', 'livingRooms']].sum(axis=1)
-    
-    # 計算每平方米房間數
-    features['rooms_per_area'] = features['total_rooms'] / features['floorAreaSqM']
-    
-    # 地理位置相關特徵
-    features['lat_lon_ratio'] = features['latitude'] / features['longitude']
-    features['lat_lon_product'] = features['latitude'] * features['longitude']
-    
-    # 時間相關特徵
-    features['sin_month'] = np.sin(2 * np.pi * features['sale_month'] / 12)
-    features['cos_month'] = np.cos(2 * np.pi * features['sale_month'] / 12)
-    features['months_since_start'] = (features['sale_year'] - features['sale_year'].min()) * 12 + features['sale_month']
-    
-    # 季節特徵
-    features['season'] = features['sale_month'].apply(lambda x: (x % 12 + 3) // 3)
-    features['is_spring'] = (features['season'] == 1).astype(int)
-    features['is_summer'] = (features['season'] == 2).astype(int)
-    
-    # 缺失值標記
-    for col in ['bathrooms', 'bedrooms', 'livingRooms']:
-        features[f'{col}_is_missing'] = features[col].isna().astype(int)
-    
-    # 比例特徵
-    for col in ['bathrooms', 'bedrooms', 'livingRooms']:
-        features[f'{col}_ratio'] = features[col] / features['total_rooms']
-    
-    # 面積的對數
-    features['floorAreaSqM_log'] = np.log1p(features['floorAreaSqM'])
-    
+    # 只對數據中實際存在的欄位進行操作
+    for col in cols_to_check_missing:
+        if col in features.columns:
+            features[f'{col}_is_missing'] = features[col].isna().astype(int)
+            
+    # --- 面積的對數轉換 ---
+    # 檢查 'floorAreaSqM' 是否存在，以安全地進行對數轉換
+    if 'floorAreaSqM' in features.columns:
+        features['floorAreaSqM_log'] = np.log1p(features['floorAreaSqM'])
+
     return features
+
+def find_feature_combinations(features: pd.DataFrame, target: pd.Series, quick_test: bool = False, config: dict = None) -> (pd.DataFrame, list):
+    # ... existing code ...
+    pass

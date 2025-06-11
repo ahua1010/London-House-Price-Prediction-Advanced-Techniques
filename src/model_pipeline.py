@@ -1,278 +1,279 @@
+import os
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import ExtraTreesRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import mean_absolute_error
-from feature_engineering import engineer_features
 import joblib
-from datetime import datetime
-import xgboost as xgb
-import lightgbm as lgb
-from catboost import CatBoostRegressor
-import os
-import pickle
-from sklearn.feature_selection import SelectFromModel
 import json
+from datetime import datetime
+from numba import cuda
 
+# 匯入模型和評估工具
+from sklearn.model_selection import KFold
+from sklearn.metrics import mean_absolute_error
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor
+from sklearn.linear_model import LinearRegression, Ridge
+import lightgbm as lgb
+import xgboost as xgb
+import catboost as cb
 
-def get_model_dict():
-    """
-    返回一個包含所有基礎模型的字典
-    每個模型都是已經初始化的實例
-    """
-    return {
-        'etr': ExtraTreesRegressor(
-            n_estimators=100,
-            random_state=42,
-            n_jobs=-1
-        ),
-        'xgb': xgb.XGBRegressor(
-            n_estimators=100,
-            random_state=42,
-            n_jobs=-1,
-            verbosity=0,
-            objective='reg:squarederror'
-        ),
-        'lgb': lgb.LGBMRegressor(
-            n_estimators=100,
-            random_state=42,
-            n_jobs=-1,
-            verbose=-1,
-            objective='regression'
-        ),
-        'cat': CatBoostRegressor(
-            iterations=100,
-            random_state=42,
-            verbose=0,
-            loss_function='RMSE',
-            eval_metric='RMSE'
-        ),
-        'lr': LinearRegression(n_jobs=-1)
-    }
+# --- 全局配置 ---
+# 透過 numba 檢查 GPU 是否可用，避免引入 torch 的重依賴
+try:
+    cuda.select_device(0)
+    USE_GPU = True
+except:
+    USE_GPU = False
+QUICK_TEST = False # 設定為 True 以快速測試流程，減少折數和特徵組合
 
-def get_most_important_features(X_train, y_train, n_features, model_name='lgb'):
-    """
-    Select most important features using specified model.
-    
-    Args:
-        X_train: Training features
-        y_train: Target variable
-        n_features: Number of features to select
-        model_name: Model to use for feature selection ('lgb', 'xgb', 'etr')
-        
-    Returns:
-        List of selected feature names
-    """
-    if model_name == 'lgb':
-        model = lgb.LGBMRegressor(n_estimators=100, random_state=42)
-    elif model_name == 'xgb':
-        model = xgb.XGBRegressor(n_estimators=100, random_state=42)
-    else:  # default to ExtraTrees
-        model = ExtraTreesRegressor(n_estimators=100, random_state=42)
-    
-    # Fit model and get feature importance
-    model.fit(X_train, y_train)
-    
-    if model_name == 'lgb':
-        importances = model.feature_importances_
-    elif model_name == 'xgb':
-        importances = model.get_booster().get_score(importance_type='gain')
-        importances = [importances.get(f, 0) for f in X_train.columns]
-    else:
-        importances = model.feature_importances_
-    
-    # Create feature importance DataFrame
-    feature_importance = pd.DataFrame({
-        'feature': X_train.columns,
-        'importance': importances
-    }).sort_values('importance', ascending=False)
-    
-    # Select top n_features
-    selected_features = feature_importance['feature'].head(n_features).tolist()
-    print(f"\n=== 特徵選擇過程 ===")
-    print(f"原始特徵數量: {len(X_train.columns)}")
-    print(f"原始特徵列表: {X_train.columns.tolist()}")
-    print(f"\n{model_name.upper()} 特徵重要性:")
-    print(feature_importance)
-    print(f"\n選中的特徵數量: {len(selected_features)}")
-    print(f"選中的特徵列表: {selected_features}")
-    
-    return selected_features
+# 匯入特徵工程模組
+from feature_engineering import engineer_features, select_features
 
-# 主訓練循環
-def run_time_series_stacking(
-    df: pd.DataFrame,
-    target_col: str,
-    n_splits: int = 5,
-    fe_config_base: dict = None,
-    quick_test: bool = False,
-    top_k_features: int = 30
-) -> dict:
+def train_and_evaluate_models(X_train, y_train, X_val, y_val, X_test, models, meta_model):
     """
-    Run time series cross-validation with model stacking.
-    
-    Args:
-        df: Input DataFrame
-        target_col: Target column name
-        n_splits: Number of time series splits
-        fe_config_base: Base feature engineering configuration
-        quick_test: Whether to run a quick test with fewer features
-        top_k_features: Number of top features to select
-        
-    Returns:
-        Dictionary containing final configuration
+    訓練基模型和元模型，並返回預測結果。
     """
-    # Initialize model dictionary
-    models = get_model_dict()
+    oof_preds = pd.DataFrame(index=X_val.index)
+    test_preds = pd.DataFrame(index=X_test.index)
     
-    # Initialize storage for predictions
-    oof_predictions = pd.DataFrame(index=df.index)
-    test_predictions = pd.DataFrame(index=df.index)
-    
-    # Initialize storage for selected features and final models
-    selected_features = None
-    final_models = {}
-    
-    # Time series cross-validation
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    
-    for fold, (train_idx, val_idx) in enumerate(tscv.split(df), 1):
-        print(f"\n=== 開始第 {fold} 折訓練 ===")
-        
-        # Split data
-        train_data = df.iloc[train_idx]
-        val_data = df.iloc[val_idx]
-        
-        # Feature engineering - now handles price transformation internally
-        train_processed = engineer_features(train_data.copy(), config=fe_config_base, is_train=True)
-        val_processed = engineer_features(val_data.copy(), config=fe_config_base, is_train=False)
-
-        # Separate features and target
-        y_train = train_processed[target_col]
-        X_train = train_processed.drop(columns=[target_col])
-        
-        y_val = np.log1p(val_data[target_col]) # We need to manually transform the validation target
-        X_val = val_processed
-        
-        # Feature selection (only in first fold)
-        if fold == 1:
-            # Ensure target is not in selected features
-            features_for_selection = [col for col in X_train.columns if col != target_col]
-            selected_features = get_most_important_features(
-                X_train[features_for_selection],
-                y_train,
-                top_k_features,
-                model_name='lgb'
-            )
-        
-        # Train base models
-        for name, model in models.items():
-            print(f"訓練模型: {name}")
-            try:
-                model.fit(X_train[selected_features], y_train)
-                # Predict on validation set
-                oof_pred = model.predict(X_val[selected_features])
-                oof_predictions.loc[val_idx, name] = oof_pred
-                
-                if fold == n_splits:
-                    final_models[name] = model
-            except Exception as e:
-                print(f"Error training {name}: {str(e)}")
-                continue
-        
-        # Calculate fold OOF MAE on original scale for better interpretation
-        fold_oof_preds_mean = oof_predictions.loc[val_idx, list(models.keys())].mean(axis=1)
-        original_scale_preds = np.expm1(fold_oof_preds_mean)
-        original_scale_true = val_data[target_col] # Use original non-transformed price
-
-        fold_oof_mae = mean_absolute_error(original_scale_true, original_scale_preds)
-        print(f"Fold {fold} OOF MAE (on original price scale): {fold_oof_mae:,.2f}")
-    
+    for name, model in models.items():
+        print(f"訓練模型: {name}")
+        try:
+            model.fit(X_train, y_train)
+            oof_preds[name] = model.predict(X_val)
+            test_preds[name] = model.predict(X_test)
+        except Exception as e:
+            print(f"訓練模型 {name} 時發生錯誤: {e}")
+            oof_preds[name] = np.nan
+            test_preds[name] = np.nan
+            
+    # 訓練元模型
     print("\n訓練元模型...")
+    meta_model.fit(oof_preds.fillna(oof_preds.mean()), y_val)
+    
+    # 元模型進行最終預測
+    final_oof_pred = meta_model.predict(oof_preds)
+    final_test_pred = meta_model.predict(test_preds)
+    
+    return pd.DataFrame(final_oof_pred, index=X_val.index, columns=['meta_pred']), \
+           final_test_pred, \
+           models
 
-    # The target for meta-model is the log-transformed price from the full dataset
-    full_y = np.log1p(df[target_col])
+def run_time_series_stacking(df, test_df, target_col, models, meta_model, n_splits=5, random_state=42, top_k=40, use_gpu=False, quick_test=False):
+    """
+    執行時間序列交叉驗證的 Stacking。
+    (已重構以防止數據洩漏)
+    """
+    print("\n=== 開始訓練 ===")
     
-    # Train meta-model
-    meta_features = oof_predictions[list(models.keys())].fillna(oof_predictions.mean())
-    meta_model = ExtraTreesRegressor(n_estimators=100, random_state=42)
-    meta_model.fit(meta_features, full_y)
+    X = df.drop(columns=[target_col], errors='ignore')
+    y = df[target_col]
     
-    # Calculate final OOF MAE on original scale
-    final_oof_predictions = oof_predictions[list(final_models.keys())].fillna(oof_predictions.mean()).mean(axis=1)
-    final_original_scale_preds = np.expm1(final_oof_predictions)
-    final_original_scale_true = df[target_col]
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    
+    oof_predictions = np.zeros(len(X))
+    test_predictions_sum = np.zeros(len(test_df))
+    oof_mae_scores = []
+    
+    fold_feature_sets = []
 
-    final_oof_mae = mean_absolute_error(final_original_scale_true, final_original_scale_preds)
-    print(f"Final OOF MAE (on original price scale): {final_oof_mae:,.2f}")
+    for fold, (train_index, val_index) in enumerate(kf.split(X, y)):
+        print(f"\n=== 開始第 {fold + 1}/{n_splits} 折訓練 ===")
+        X_train_fold_raw, X_val_fold_raw = X.iloc[train_index], X.iloc[val_index]
+        y_train_fold, y_val_fold = y.iloc[train_index], y.iloc[val_index]
+        
+        print(f"本折原始維度: Train={X_train_fold_raw.shape}, Val={X_val_fold_raw.shape}")
+
+        # --- 特徵工程 (在 Fold 內部進行) ---
+        X_train_with_target = X_train_fold_raw.copy()
+        X_train_with_target[target_col] = y_train_fold
+
+        config_fold = {}
+        X_train_featured, y_train_log_processed, config_fold = engineer_features(
+            X_train_with_target, is_train=True, config=config_fold, quick_test=quick_test
+        )
+        
+        X_val_featured, _, _ = engineer_features(
+            X_val_fold_raw.copy(), is_train=False, config=config_fold, quick_test=quick_test
+        )
+        test_df_featured_fold, _, _ = engineer_features(
+            test_df.copy(), is_train=False, config=config_fold, quick_test=quick_test
+        )
+
+        # --- 特徵選擇 (在 Fold 內部進行) ---
+        selected_features, config_fold = select_features(
+            X_train_featured, y_train_log_processed, config=config_fold, k=top_k, use_gpu=USE_GPU
+        )
+        fold_feature_sets.append(set(selected_features))
+        
+        # 確保所有選中的特徵都存在於所有數據集中
+        final_selected_features = [f for f in selected_features if f in X_train_featured.columns and f in X_val_featured.columns and f in test_df_featured_fold.columns]
+        
+        X_train_selected = X_train_featured[final_selected_features]
+        X_val_selected = X_val_featured[final_selected_features]
+        test_selected = test_df_featured_fold[final_selected_features]
+        
+        print(f"特徵工程與選擇後，維度: Train={X_train_selected.shape}, Val={X_val_selected.shape}, Test={test_selected.shape}")
+
+        # 模型訓練與預測
+        y_val_log = np.log1p(y_val_fold)
+        fold_oof_preds, fold_test_preds, _ = train_and_evaluate_models(
+            X_train_selected, y_train_log_processed, 
+            X_val_selected, y_val_log,
+            test_selected, 
+            models, meta_model
+        )
+        
+        oof_predictions[val_index] = fold_oof_preds['meta_pred'].values
+        test_predictions_sum += fold_test_preds
+        
+        original_scale_preds = np.expm1(fold_oof_preds['meta_pred'].values)
+        fold_oof_mae = mean_absolute_error(y_val_fold, original_scale_preds)
+        oof_mae_scores.append(fold_oof_mae)
+        print(f"Fold {fold + 1} OOF MAE (on original price scale): {fold_oof_mae:,.2f}")
+
+    final_oof_mae = np.mean(oof_mae_scores)
+    print(f"\nFinal OOF MAE (on original price scale): {final_oof_mae:,.2f}")
     
-    # Save final model and configuration
+    oof_preds_series = pd.Series(oof_predictions, index=X.index)
+    final_test_preds = test_predictions_sum / n_splits
+    
+    # --- 訓練最終模型 (在所有數據上) ---
+    print("\n=== 訓練最終模型 (使用所有數據) ===")
+    final_config = {}
+    
+    X_full_with_target = df.copy()
+    X_full_featured, y_full_log, final_config = engineer_features(
+        X_full_with_target, is_train=True, config=final_config, quick_test=quick_test
+    )
+
+    if fold_feature_sets:
+        final_features = list(set.intersection(*fold_feature_sets))
+        if not final_features:
+            print("警告：各折之間沒有共同的特徵，將使用所有折特徵的聯集。")
+            final_features = list(set.union(*fold_feature_sets))
+        print(f"最終模型將使用 {len(final_features)} 個特徵。")
+    else:
+        final_features = X_full_featured.columns.tolist()
+        print("警告: 未找到交叉驗證的特徵集，最終模型將使用所有特徵。")
+    
+    # 確保最終特徵存在於完全工程化的數據框中
+    final_features = [f for f in final_features if f in X_full_featured.columns]
+    final_config['selected_features'] = final_features
+    X_full_selected = X_full_featured[final_features]
+
+    final_trained_models = {}
+    for name, model in models.items():
+        print(f"訓練最終模型: {name}")
+        model.fit(X_full_selected, y_full_log)
+        final_trained_models[name] = model
+        
+    final_config['trained_models'] = final_trained_models
+
+    return oof_preds_series, final_test_preds, final_config
+
+def save_artifacts(config, oof_preds, test_preds, submission_df):
+    """
+    儲存所有訓練產物。
+    """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir = f"output/models/stacking_{timestamp}"
     os.makedirs(save_dir, exist_ok=True)
-    
-    # Save individual models
-    for name, model in final_models.items():
-        model_path = os.path.join(save_dir, f"{name}_model.pkl")
-        with open(model_path, 'wb') as f:
-            pickle.dump(model, f)
-    
-    # Save meta model
-    meta_model_path = os.path.join(save_dir, "meta_model.pkl")
-    with open(meta_model_path, 'wb') as f:
-        pickle.dump(meta_model, f)
-    
-    # Create and save complete configuration
-    final_config = {
-        'selected_features': selected_features,
-        'model_paths': {
-            name: os.path.join(save_dir, f"{name}_model.pkl")
-            for name in final_models.keys()
-        },
-        'meta_model_path': meta_model_path,
-        'oof_mae': final_oof_mae,
-        'timestamp': timestamp,
-        'feature_engineering_config': fe_config_base,
-        'models': final_models,
-        'meta_model': meta_model
+
+    # 儲存模型
+    trained_models = config.get('trained_models', {})
+    if trained_models:
+        for name, model in trained_models.items():
+            joblib.dump(model, os.path.join(save_dir, f"{name}.pkl"))
+
+    # 創建一個乾淨的 config 來儲存，避免循環引用
+    config_to_save = {
+        'selected_features': config.get('selected_features'),
+        'better_features_list': config.get('better_features_list'),
+        # 如果有其他需要保存的 scaler 或 imputer，可以在這裡添加
     }
     
-    # Save complete configuration as a single pickle file
-    config_path = os.path.join(save_dir, "config.pkl")
-    with open(config_path, 'wb') as f:
-        pickle.dump(final_config, f)
+    with open(os.path.join(save_dir, 'config.json'), 'w') as f:
+        # 使用自訂的轉換器處理 numpy 類型
+        json.dump(config_to_save, f, indent=4, default=lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
+
+    # 儲存 OOF 預測
+    oof_df = pd.DataFrame({'ID': oof_preds.index, 'oof_predictions': oof_preds})
+    oof_df.to_csv(os.path.join(save_dir, 'oof_predictions.csv'), index=False)
+
+    # 儲存測試集預測並創建提交檔案
+    submission_df['price'] = np.expm1(test_preds)
+    submission_df.to_csv(os.path.join(save_dir, 'submission.csv'), index=False)
     
-    return final_config
+    print(f"\n訓練完成。所有產物已儲存於 {save_dir}")
+    return save_dir
+
+def main():
+    # 讀取數據
+    print("=== 讀取數據 ===")
+    try:
+        train_df = pd.read_csv('train.csv', index_col='ID')
+        test_df = pd.read_csv('test.csv', index_col='ID')
+        submission_df = pd.read_csv('sample_submission.csv')
+    except FileNotFoundError as e:
+        print(f"錯誤: 找不到數據文件 - {e}")
+        return
+
+    n_splits = 2 if QUICK_TEST else 5
+    print(f"\n--- 快速測試模式: {'啟用' if QUICK_TEST else '禁用'} (使用 {n_splits} 折) ---")
+
+    if QUICK_TEST:
+        print("--- 快速測試模式: 正在縮減初始特徵集 ---")
+        # 定義快速測試所需的核心原始特徵
+        core_features = [
+            'floorAreaSqM',
+            'latitude', 'longitude',
+            'propertyType',
+            'sale_year',
+            'postcode',
+        ]
+        # 確保目標欄位 'price' 被保留在訓練集中，並處理數據集中可能不存在的欄位
+        train_cols_to_keep = [col for col in core_features if col in train_df.columns] + ['price']
+        test_cols_to_keep = [col for col in core_features if col in test_df.columns]
+        
+        train_df = train_df[list(set(train_cols_to_keep))]
+        test_df = test_df[list(set(test_cols_to_keep))]
+        print(f"初始特徵已縮減為 {len(test_cols_to_keep)} 個核心特徵。")
+
+    # 設置 GPU 加速
+    print(f"\n--- GPU 加速已{'啟用' if USE_GPU else '禁用'} ---")
+
+    # 定義模型
+    models = {
+        'etr': ExtraTreesRegressor(n_estimators=100, random_state=42, n_jobs=-1, bootstrap=True),
+        'xgb': xgb.XGBRegressor(objective='reg:squarederror', n_estimators=1000, learning_rate=0.05,
+                                max_depth=7, min_child_weight=1, gamma=0.1, subsample=0.8,
+                                colsample_bytree=0.8, reg_alpha=0.005, random_state=42),
+        'lgb': lgb.LGBMRegressor(random_state=42),
+        'cat': cb.CatBoostRegressor(random_state=42, verbose=0),
+    }
+    meta_model = Ridge()
+
+    if USE_GPU:
+        print("\n--- GPU 加速已啟用 ---")
+        # 更新模型以使用 GPU
+        models['xgb'] = xgb.XGBRegressor(random_state=42, tree_method='gpu_hist')
+        models['lgb'] = lgb.LGBMRegressor(random_state=42, device='gpu')
+        models['cat'] = cb.CatBoostRegressor(random_state=42, verbose=0, task_type='GPU')
+        # rf 和 meta_model (LinearRegression) 不支援 GPU，保持原樣
+    else:
+        print("\n--- GPU 加速已禁用，使用 CPU ---")
+
+    # 執行訓練
+    oof_preds, test_preds, final_config = run_time_series_stacking(
+        train_df, test_df, 'price', models, meta_model, 
+        n_splits=n_splits,
+        top_k=40, 
+        use_gpu=USE_GPU,
+        quick_test=QUICK_TEST
+    )
+    
+    # 儲存結果
+    save_artifacts(final_config, oof_preds, test_preds, submission_df)
+
 
 if __name__ == "__main__":
-    # Set paths
-    train_path = "train.csv"
-    test_path = "test.csv"
-    output_path = "output"
-    
-    try:
-        # Read data
-        print("=== 讀取數據 ===")
-        train_df = pd.read_csv(train_path)
-        test_df = pd.read_csv(test_path)
-        
-        # Run model with quick test mode
-        print("\n=== 開始訓練 ===")
-        final_config = run_time_series_stacking(
-            df=train_df,
-            target_col='price',
-            n_splits=5,
-            fe_config_base={},
-            quick_test=True,
-            top_k_features=30
-        )
-        print(f"\n訓練完成。模型與設定已儲存於 {final_config['meta_model_path']}")
-
-    except Exception as e:
-        print("\n=== 訓練過程中發生錯誤 ===")
-        print(f"錯誤類型: {type(e).__name__}")
-        print(f"錯誤信息: {e}\n")
-        import traceback
-        print("完整錯誤堆疊:")
-        traceback.print_exc() 
+    main() 
