@@ -4,10 +4,10 @@ import lightgbm as lgb
 from tqdm import tqdm
 from sklearn.impute import KNNImputer
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.model_selection import KFold, TimeSeriesSplit
 import warnings
 warnings.filterwarnings('ignore')
 import xgboost as xgb
-from typing import Tuple
 import catboost as cb
 
 # --- HELPER FUNCTION (Provided by you) ---
@@ -234,6 +234,9 @@ def better_features(features, target_series, is_train, config, columns_to_combin
         features_to_use = [f for f in core_features_for_combination if f in features.columns]
     else:
         features_to_use = features.select_dtypes(include=np.number).columns.tolist()
+        # 移除 'index' 列（如果存在）
+        if 'index' in features_to_use:
+            features_to_use.remove('index')
 
     if len(features_to_use) < 2:
         print("    可用於組合的特徵少於2個，跳過此步驟。")
@@ -331,7 +334,7 @@ def select_features_with_lgbm(features, target, k, use_gpu=False):
             params['device'] = 'gpu'
             lgbm = lgb.LGBMRegressor(**params)
             lgbm.fit(features, target)
-            print("LGBM feature selection running on GPU.")
+            # print("LGBM feature selection running on GPU.")
         except Exception as e:
             print(f"LGBM on GPU failed ({e}), falling back to CPU.")
             params.pop('device')
@@ -358,7 +361,7 @@ def select_features_with_xgb(features, target, k, use_gpu=False):
             params['tree_method'] = 'gpu_hist'
             xgb_model = xgb.XGBRegressor(**params)
             xgb_model.fit(safe_features, target)
-            print("XGB feature selection running on GPU.")
+            # print("XGB feature selection running on GPU.")
         except Exception as e:
             print(f"XGB on GPU failed ({e}), falling back to CPU.")
             params.pop('tree_method')
@@ -385,7 +388,7 @@ def select_features_with_cat(features, target, k, use_gpu=False):
             params['task_type'] = 'GPU'
             cat_model = cb.CatBoostRegressor(**params)
             cat_model.fit(features, target)
-            print("CatBoost feature selection running on GPU.")
+            # print("CatBoost feature selection running on GPU.")
         except Exception as e:
             print(f"CatBoost on GPU failed ({e}), falling back to CPU.")
             params.pop('task_type')
@@ -401,49 +404,95 @@ def select_features_with_cat(features, target, k, use_gpu=False):
     }).sort_values('importance', ascending=False)
     return feature_importance_df.head(k)['feature'].tolist()
 
-def select_features(
-    X: pd.DataFrame, 
-    y: pd.Series, 
-    config: dict,
-    k: int = 40,
-    use_gpu: bool = False,
-) -> Tuple[list, dict]:
+def select_features(X, y, config, k=40, use_gpu=False):
     """
-    使用三種不同的模型（LGBM、XGBoost、CatBoost）來選擇 top-k 特徵。
-    返回三種模型選擇的特徵的聯集。
+    使用多個模型進行特徵選擇，在時間序列交叉驗證的每一折上訓練，取聯集
+    
+    Args:
+        X: 特徵數據框
+        y: 目標變量
+        config: 配置字典
+        k: 每個模型選擇的特徵數量
+        use_gpu: 是否使用 GPU
     """
-    print(f"\n=== 預處理步驟 2: 預先執行特徵選擇 ===")
-
-    # 如果總特徵數小於等於 k，則直接返回所有特徵，無需選擇
-    if X.shape[1] <= k:
-        print(f"特徵總數 ({X.shape[1]}) 小於等於 k ({k})，跳過特徵選擇。")
-        selected_features = X.columns.tolist()
-        config['selected_features'] = selected_features
-        return selected_features, config
-
-    lgb_features = select_features_with_lgbm(X.copy(), y, k, use_gpu)
-    print(f"LGB 選擇了 {len(lgb_features)} 個 top-{k} 特徵")
-
-    xgb_features = select_features_with_xgb(X.copy(), y, k, use_gpu)
-    print(f"XGB 選擇了 {len(xgb_features)} 個 top-{k} 特徵")
-
-    cat_features = select_features_with_cat(X.copy(), y, k, use_gpu)
-    print(f"CatBoost 選擇了 {len(cat_features)} 個 top-{k} 特徵")
-
-    # 合併所有選中的特徵
-    selected_features = list(set(lgb_features + xgb_features + cat_features))
+    # 移除 index 特徵
+    X = X.copy()
+    if 'index' in X.columns:
+        X = X.drop(columns=['index'])
     
-    # 如果沒有選中任何特徵，使用所有特徵
-    if not selected_features:
-        selected_features = X.columns.tolist()
+    # 檢查是否有時間相關特徵
+    has_time_features = any(col in X.columns for col in ['sale_year', 'sale_month', 'sale_day'])
     
-    print(f"最終選擇了 {len(selected_features)} 個特徵")
-    print(f"選中的特徵列表(前10個): {selected_features[:10]}")
+    # 選擇交叉驗證方法
+    if has_time_features:
+        print("檢測到時間特徵，使用時間序列交叉驗證...")
+        cv = TimeSeriesSplit(n_splits=5)
+    else:
+        print("未檢測到時間特徵，使用標準 KFold 交叉驗證...")
+        cv = KFold(n_splits=5, shuffle=True, random_state=42)
     
-    # 保存選中的特徵到配置中
-    config['selected_features'] = selected_features
+    # 使用多個模型進行特徵選擇
+    models = {
+        'lgb': select_features_with_lgbm,
+        'xgb': select_features_with_xgb,
+        'cat': select_features_with_cat
+    }
     
-    return selected_features, config
+    # 收集每個模型在每一折上的特徵重要性
+    feature_importance = {
+        'lgb': {},
+        'xgb': {},
+        'cat': {}
+    }
+    
+    for model_name, select_func in models.items():
+        print(f"\n使用 {model_name.upper()} 進行特徵選擇...")
+        
+        # 在每個折上進行特徵選擇
+        for fold, (train_idx, val_idx) in enumerate(cv.split(X)):
+            X_train_fold = X.iloc[train_idx]
+            y_train_fold = y.iloc[train_idx]
+            
+            # 使用當前折的訓練數據選擇特徵
+            selected_features = select_func(
+                X_train_fold, 
+                y_train_fold, 
+                k=k, 
+                use_gpu=use_gpu
+            )
+            
+            # 更新特徵重要性
+            for feature in selected_features:
+                if feature in feature_importance[model_name]:
+                    feature_importance[model_name][feature] += 1
+                else:
+                    feature_importance[model_name][feature] = 1
+    
+    # 對每個模型，選擇在最多折中出現的 top-k 個特徵
+    final_features = set()
+    for model_name in models.keys():
+        # 按出現次數排序特徵
+        sorted_features = sorted(
+            feature_importance[model_name].items(),
+            key=lambda x: (-x[1], x[0])  # 先按出現次數降序，再按特徵名稱升序
+        )
+        # 選擇 top-k 個特徵
+        top_k_features = [f[0] for f in sorted_features[:k]]
+        final_features.update(top_k_features)
+    
+    # 更新配置字典
+    config['selected_features'] = list(final_features)
+    config['feature_importance'] = {
+        model: dict(sorted(features.items(), key=lambda x: (-x[1], x[0]))[:k])
+        for model, features in feature_importance.items()
+    }
+    
+    print(f"\n各模型選擇的特徵數量:")
+    for model in models.keys():
+        print(f"{model.upper()}: {k}")  # 現在每個模型都嚴格選擇 k 個特徵
+    print(f"聯集後的特徵數量: {len(final_features)}")
+    
+    return list(final_features), config
 
 def scale_features(df, is_train=True, config=None):
     """
@@ -546,7 +595,6 @@ def handle_missing_values(df: pd.DataFrame, is_train: bool, config: dict) -> pd.
                     features = impute_feature_with_lgbm(features, col, predictor_cols, is_train, config)
     else:
         # 對於測試集，使用訓練時儲存的中位數或簡單策略
-        print("\n為測試集處理缺失值...")
         for col in cols_to_impute:
             # 使用在訓練階段可能保存的中位數，或計算當前測試集的中位數作為後備
             fallback_median = features[col].median()
