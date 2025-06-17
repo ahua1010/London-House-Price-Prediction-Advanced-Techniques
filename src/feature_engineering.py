@@ -1,3 +1,4 @@
+from typing import Optional
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
@@ -11,16 +12,25 @@ import xgboost as xgb
 import catboost as cb
 
 # --- HELPER FUNCTION (Provided by you) ---
+# def haversine_distance(lat1, lon1, lat2, lon2):
+#     R = 6371  # Radius of Earth in kilometers
+#     lat1_rad, lon1_rad = np.radians(lat1), np.radians(lon1)
+#     lat2_rad, lon2_rad = np.radians(lat2), np.radians(lon2)
+#     dlon = lon2_rad - lon1_rad
+#     dlat = lat2_rad - lat1_rad
+#     a = np.sin(dlat / 2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2)**2
+#     c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+#     return R * c
 def haversine_distance(lat1, lon1, lat2, lon2):
-    R = 6371  # Radius of Earth in kilometers
-    lat1_rad, lon1_rad = np.radians(lat1), np.radians(lon1)
-    lat2_rad, lon2_rad = np.radians(lat2), np.radians(lon2)
-    dlon = lon2_rad - lon1_rad
-    dlat = lat2_rad - lat1_rad
-    a = np.sin(dlat / 2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2)**2
-    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
-    return R * c
-
+    """
+    計算兩點之間的 haversine 距離（單位：公里）
+    """
+    R = 6371  # 地球半徑 (km)
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat/2.0)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2.0)**2
+    return R * 2 * np.arcsin(np.sqrt(a))
 def impute_with_knn(data, target_col, predictor_cols):
     """
     使用 KNN 進行缺失值插補
@@ -353,8 +363,27 @@ def select_features_with_lgbm(features, target, k, use_gpu=False):
 def select_features_with_xgb(features, target, k, use_gpu=False):
     """使用 XGBoost 選擇 top-k 特徵，支援 GPU"""
     params = {'random_state': 42, 'n_jobs': -1}
+    
     # 確保特徵名稱不包含 XGBoost 不支援的字符
     safe_features = features.rename(columns = lambda x: x.replace('[', '').replace(']', '').replace('<', ''))
+    
+    # 確保所有特徵都是數值型
+    for col in safe_features.columns:
+        if safe_features[col].dtype == 'object':
+            # 嘗試轉換為數值型，如果失敗則使用標籤編碼
+            try:
+                safe_features[col] = pd.to_numeric(safe_features[col], errors='coerce')
+                safe_features[col] = safe_features[col].fillna(0)
+            except:
+                from sklearn.preprocessing import LabelEncoder
+                le = LabelEncoder()
+                safe_features[col] = le.fit_transform(safe_features[col].astype(str))
+        elif safe_features[col].dtype.name == 'category':
+            # 將 categorical 轉換為數值型
+            safe_features[col] = safe_features[col].cat.codes
+    
+    # 處理任何剩餘的 NaN 值
+    safe_features = safe_features.fillna(0)
     
     if use_gpu:
         try:
@@ -511,10 +540,14 @@ def scale_features(df, is_train=True, config=None):
     
     # 1. 處理無限值和極大值
     df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.fillna(0)
+    # 只對 numeric 欄位填補 0，避免觸發 categorical type 錯誤
+    numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
+    df[numeric_cols] = df[numeric_cols].fillna(0)
+
     
     # 2. 選擇需要縮放的特徵
-    numeric_features = df.select_dtypes(include=['int64', 'float64']).columns
+    # numeric_features = df.select_dtypes(include=['int64', 'float64']).columns
+    numeric_features = df.select_dtypes(include=['int64', 'float64']).columns.difference(['latitude', 'longitude'])
     
     if is_train:
         # 訓練集：創建新的 scaler
@@ -564,8 +597,24 @@ def validate_features(df, is_train=True, config=None):
         upper_bound = Q3 + 1.5 * IQR
         # 將異常值替換為邊界值
         df[col] = df[col].clip(lower=lower_bound, upper=upper_bound)
-    # 3. 處理剩餘的 NaN
-    df = df.fillna(0)
+    # 3. 處理剩餘的 NaN - 分別處理不同類型的欄位
+    # 數值型欄位用 0 填充
+    numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
+    df[numeric_cols] = df[numeric_cols].fillna(0)
+    
+    # categorical 欄位需要特別處理 - 轉換為數值型以避免模型相容性問題
+    categorical_cols = df.select_dtypes(include=['category']).columns
+    for col in categorical_cols:
+        if df[col].isnull().any():
+            # 先填充缺失值，然後轉換為數值型
+            df[col] = df[col].fillna('unknown')
+        # 將 categorical 轉換為數值型（使用 codes）
+        df[col] = df[col].cat.codes.astype('int64')
+    
+    # 其他類型（如 object）用適當的值填充
+    object_cols = df.select_dtypes(include=['object']).columns
+    df[object_cols] = df[object_cols].fillna('unknown')
+    
     return df
 
 def handle_missing_values(df: pd.DataFrame, is_train: bool, config: dict) -> pd.DataFrame:
@@ -642,6 +691,219 @@ def process_categorical_features(df: pd.DataFrame, is_train: bool, config: dict)
     
     return features
 
+def engineer_geo_features(features: pd.DataFrame, is_train: bool, config: dict, target_series: Optional[pd.Series] = None):
+    """
+    執行完整的地理特徵工程，包括距離、聚類、交互特徵和目標編碼。
+    
+    Args:
+        features: 包含地理信息的 DataFrame
+        is_train: 是否為訓練模式
+        config: 配置字典
+        target_series: 目標變量（用於目標編碼）
+        
+    Returns:
+        處理後的 DataFrame
+    """
+    from sklearn.cluster import KMeans
+    import numpy as np
+    
+    print("    -> 開始地理特徵工程...")
+    
+    # 確保有經緯度數據
+    if not all(col in features.columns for col in ['latitude', 'longitude']):
+        print("    -> 缺少經緯度信息，跳過地理特徵工程")
+        return features
+    
+    # 處理經緯度缺失值
+    features[['latitude', 'longitude']] = features[['latitude', 'longitude']].fillna(0)
+    
+    # === 1. 基本地理數學特徵 ===
+    print("    -> 創建基本地理數學特徵...")
+    features['lat_lon_ratio'] = features['latitude'] / (features['longitude'] + 1e-9)
+    features['lat_lon_product'] = features['latitude'] * features['longitude']
+    features['lat_squared'] = features['latitude'] ** 2
+    features['lon_squared'] = features['longitude'] ** 2
+    features['lat_lon_distance'] = np.sqrt(features['lat_squared'] + features['lon_squared'])
+    
+    # === 2. 倫敦重要地標距離特徵 ===
+    print("    -> 計算到倫敦重要地標的距離...")
+    
+    # 倫敦重要地標座標
+    london_landmarks = {
+        'city_center': (51.5074, -0.1278),    # 倫敦市中心
+        'canary_wharf': (51.5055, -0.0195),    # 金絲雀碼頭 (金融區)
+        'westminster': (51.4994, -0.1244),     # 西敏寺
+        'king_cross': (51.5308, -0.1238),     # 國王十字車站
+        'heathrow': (51.4700, -0.4543),       # 希斯洛機場
+        'greenwich': (51.4769, -0.0005),      # 格林威治
+    }
+    
+    for landmark_name, (lat, lon) in london_landmarks.items():
+        features[f'dist_to_{landmark_name}'] = haversine_distance(
+            features['latitude'], features['longitude'], lat, lon
+        )
+    
+    # === 3. 地理聚類特徵 ===
+    print("    -> 執行地理聚類...")
+    coords = features[['latitude', 'longitude']].values
+    
+    # 多層次聚類
+    cluster_configs = {
+        'geo_cluster_coarse': 10,   # 粗粒度聚類
+        'geo_cluster_medium': 20,   # 中等粒度聚類
+        'geo_cluster_fine': 50      # 細粒度聚類
+    }
+    
+    for cluster_name, n_clusters in cluster_configs.items():
+        if is_train:
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            kmeans.fit(coords)
+            config[f'{cluster_name}_model'] = kmeans
+        
+        kmeans_model = config.get(f'{cluster_name}_model')
+        if kmeans_model:
+            features[cluster_name] = kmeans_model.predict(coords)
+    
+    # === 4. 地理網格特徵 ===
+    print("    -> 創建地理網格特徵...")
+    
+    # 不同精度的地理網格
+    grid_precisions = [1, 2, 3]  # 小數點位數
+    for precision in grid_precisions:
+        features[f'geo_grid_{precision}'] = (
+            features['latitude'].round(precision).astype(str) + "_" + 
+            features['longitude'].round(precision).astype(str)
+        )
+    
+    # === 5. 地理密度特徵 ===
+    print("    -> 計算地理密度特徵...")
+    
+    # 計算不同半徑內的房屋密度
+    density_radii = [0.5, 1.0, 2.0]  # 公里
+    
+    for radius in density_radii:
+        density_feature = f'density_{radius}km'
+        if is_train:
+            # 為每個點計算指定半徑內的房屋數量
+            densities = []
+            coords_array = features[['latitude', 'longitude']].values
+            
+            for i, (lat, lon) in enumerate(coords_array):
+                # 計算到所有其他點的距離
+                distances = haversine_distance(
+                    lat, lon, 
+                    coords_array[:, 0], coords_array[:, 1]
+                )
+                # 計算半徑內的點數量（排除自己）
+                density = np.sum(distances <= radius) - 1
+                densities.append(density)
+            
+            features[density_feature] = densities
+            config[f'{density_feature}_median'] = np.median(densities)
+        else:
+            # 測試集使用訓練集的中位數密度
+            median_density = config.get(f'{density_feature}_median', 0)
+            features[density_feature] = median_density
+    
+    # === 6. 目標編碼特徵 ===
+    print("    -> 執行地理目標編碼...")
+    
+    # 對不同精度的地理網格進行目標編碼
+    if target_series is not None and is_train:
+        for precision in [1, 2, 3]:
+            grid_col = f'geo_grid_{precision}'
+            target_encoding = (
+                features[[grid_col]].join(target_series.rename("target"))
+                .groupby(grid_col)['target'].agg(['mean', 'median', 'std', 'count'])
+            )
+            
+            # 保存編碼映射
+            config[f'{grid_col}_mean_encoding'] = target_encoding['mean'].to_dict()
+            config[f'{grid_col}_median_encoding'] = target_encoding['median'].to_dict()
+            config[f'{grid_col}_std_encoding'] = target_encoding['std'].fillna(0).to_dict()
+            config[f'{grid_col}_count_encoding'] = target_encoding['count'].to_dict()
+    
+    # 應用目標編碼
+    for precision in [1, 2, 3]:
+        grid_col = f'geo_grid_{precision}'
+        
+        # 平均值編碼
+        mean_encoding = config.get(f'{grid_col}_mean_encoding', {})
+        features[f'{grid_col}_mean_price'] = features[grid_col].map(mean_encoding).fillna(
+            np.mean(list(mean_encoding.values())) if mean_encoding else 0
+        )
+        
+        # 中位數編碼
+        median_encoding = config.get(f'{grid_col}_median_encoding', {})
+        features[f'{grid_col}_median_price'] = features[grid_col].map(median_encoding).fillna(
+            np.median(list(median_encoding.values())) if median_encoding else 0
+        )
+        
+        # 標準差編碼（價格變異性）
+        std_encoding = config.get(f'{grid_col}_std_encoding', {})
+        features[f'{grid_col}_price_volatility'] = features[grid_col].map(std_encoding).fillna(0)
+        
+        # 計數編碼（區域活躍度）
+        count_encoding = config.get(f'{grid_col}_count_encoding', {})
+        features[f'{grid_col}_activity'] = features[grid_col].map(count_encoding).fillna(0)
+    
+    # === 7. 特殊地理區域特徵 ===
+    print("    -> 創建特殊地理區域特徵...")
+    
+    # 泰晤士河南北區分
+    features['is_south_thames'] = (features['latitude'] < 51.5).astype(int)
+    
+    # 距離泰晤士河的距離（簡化為到市中心緯度的距離）
+    features['thames_distance'] = np.abs(features['latitude'] - 51.5074)
+    
+    # 倫敦zone特徵（基於距離市中心的距離）
+    city_center_dist = features['dist_to_city_center']
+    features['london_zone'] = pd.cut(
+        city_center_dist, 
+        bins=[0, 5, 10, 15, 20, np.inf], 
+        labels=[1, 2, 3, 4, 5]
+    ).astype(int)
+    
+    # === 8. 交互特徵 ===
+    print("    -> 創建地理交互特徵...")
+    
+    # 地理聚類與房屋類型交互
+    if 'propertyType' in features.columns:
+        for cluster_col in ['geo_cluster_coarse', 'geo_cluster_medium']:
+            if cluster_col in features.columns:
+                interaction_col = f'{cluster_col}_propertyType'
+                features[interaction_col] = (
+                    features[cluster_col].astype(str) + "_" + 
+                    features['propertyType'].astype(str)
+                )
+                features[interaction_col] = features[interaction_col].astype("category")
+    
+    # outcode相關特徵
+    if 'outcode' in features.columns:
+        if is_train and target_series is not None:
+            outcode_map = (
+                features[['outcode']].join(target_series.rename("target"))
+                .groupby('outcode')['target'].agg(['mean', 'median', 'std', 'count'])
+            )
+            config['outcode_mean_price'] = outcode_map['mean'].to_dict()
+            config['outcode_median_price'] = outcode_map['median'].to_dict()
+            config['outcode_std_price'] = outcode_map['std'].fillna(0).to_dict()
+            config['outcode_count'] = outcode_map['count'].to_dict()
+        
+        # 應用 outcode 編碼
+        for stat in ['mean', 'median', 'std', 'count']:
+            encoding_key = f'outcode_{stat}_price' if stat != 'count' else 'outcode_count'
+            encoding_map = config.get(encoding_key, {})
+            default_val = (
+                np.mean(list(encoding_map.values())) if encoding_map and stat in ['mean', 'median'] 
+                else 0
+            )
+            features[f'outcode_{stat}_price'] = features['outcode'].map(encoding_map).fillna(default_val)
+    
+    print(f"    -> 地理特徵工程完成，新增 {len([col for col in features.columns if col.startswith(('lat_', 'lon_', 'dist_', 'geo_', 'density_', 'london_', 'thames_', 'is_', 'outcode_'))])} 個地理特徵")
+    
+    return features
+
 def engineer_features(features: pd.DataFrame, is_train: bool, config: dict, quick_test: bool = False):
     """
     對給定的 DataFrame 執行完整的特徵工程流程。
@@ -682,7 +944,9 @@ def engineer_features(features: pd.DataFrame, is_train: bool, config: dict, quic
 
     features = handle_missing_values(features, is_train=is_train, config=config)
     print(f"-> 缺失值處理後數量: {features.shape[1]}")
-    
+     # 加入地理特徵工程
+    features = engineer_geo_features(features, is_train=is_train, config=config, target_series=target_series)
+    print(f"-> 地理特徵工程後數量: {features.shape[1]}")
     # 執行自動化特徵組合
     features, config = better_features(features, target_series=target_series, is_train=is_train, config=config, quick_test=quick_test)
     print(f"-> 特徵組合後數量: {features.shape[1]}")
@@ -719,12 +983,8 @@ def create_derived_features(features: pd.DataFrame, is_train: bool, config: dict
         features['bedrooms_ratio'] = features['bedrooms'] / (features['total_rooms'] + 1e-6)
         features['livingRooms_ratio'] = features['livingRooms'] / (features['total_rooms'] + 1e-6)
 
-    # --- 地理位置特徵 ---
-    geo_cols = ['latitude', 'longitude']
-    if all(col in features.columns for col in geo_cols):
-        features['lat_lon_ratio'] = features['latitude'] / (features['longitude'] + 1e-9)
-        features['lat_lon_product'] = features['latitude'] * features['longitude']
-
+    # --- 地理位置特徵處理已移至 engineer_geo_features 函數 ---
+    # 這裡只保留必要的基本特徵，詳細的地理特徵工程在專門的函數中處理
     # --- 時間相關特徵 ---
     if 'sale_month' in features.columns:
         features['sale_month'] = pd.to_numeric(features['sale_month'], errors='coerce')
