@@ -19,7 +19,7 @@ from sklearn.svm import SVR
 from sklearn.ensemble import RandomForestRegressor, VotingRegressor
 from sklearn.neural_network import MLPRegressor
 from xgboost import XGBRegressor
-from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import GridSearchCV, KFold
 from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
 
 
@@ -148,9 +148,12 @@ def create_time_series_features(train_data, test_data):
     """創建時間序列特徵"""
     print("創建時間序列特徵...")
     
+    # 結合訓練集和測試集的時間索引，以涵蓋所有時間點
+    combined_index = train_data.index.union(test_data.index).unique()
+
     # 創建確定性過程（趨勢、季節性、週期性）
     deterministic_process = DeterministicProcess(
-        index=train_data.index.unique(),
+        index=combined_index,
         constant=True,        # 常數項
         seasonal=True,        # 季節性
         order=12,            # 趨勢階數
@@ -158,27 +161,20 @@ def create_time_series_features(train_data, test_data):
         additional_terms=[CalendarFourier(freq="QE", order=4)],  # 季度傅立葉項
     )
     
-    # 為訓練資料添加時間序列特徵
-    time_features_train = deterministic_process.in_sample()
-    train_data = train_data.join(time_features_train, how='left')
+    # 為整個時間範圍生成特徵
+    time_features = deterministic_process.in_sample()
     
-    # 計算預測相關參數
-    forecast_origin = train_data.index.max()
-    forecast_lead = test_data.index.min() - forecast_origin
-    forecast_horizon = test_data.index.max() - test_data.index.min()
+    # 分別為訓練資料和測試資料添加時間序列特徵
+    train_data = train_data.join(time_features, how='left')
+    test_data = test_data.join(time_features, how='left')
     
-    print(f"預測起點: {forecast_origin}")
-    print(f"領先時間: {forecast_lead.n} 個月")
-    print(f"預測範圍: {forecast_horizon.n} 個月")
-    
-    # 為測試資料添加時間序列特徵
-    time_features_test = deterministic_process.out_of_sample(
-        steps=forecast_horizon.n + forecast_lead.n
-    )
-    test_data = test_data.join(time_features_test, how='left')
+    # 確保測試資料的索引名稱正確
     test_data.index.name = 'time'
     
-    return train_data, test_data, time_features_train.columns.tolist()
+    # 移除預測相關的打印信息，因為這不再是預測任務
+    print("時間序列特徵已為訓練集和測試集創建。")
+
+    return train_data, test_data, time_features.columns.tolist()
 
 
 def create_additional_features(data_list):
@@ -383,15 +379,19 @@ def create_and_tune_model(X_train, y_train, trend_features, machine_learning_fea
         }
     }
     
+    # 定義交叉驗證策略：隨機 K 折
+    kfold = KFold(n_splits=5, shuffle=True, random_state=42)
+
     # 進行網格搜索
     best_models = {}
     for model_name, pipeline in model_pipeline.items():
         print(f"調優 {model_name}...")
         
+        # 使用 KFold 進行隨機分割交叉驗證
         grid_search = GridSearchCV(
             pipeline, 
             hyperparameter_grid[model_name], 
-            cv=5, 
+            cv=kfold, 
             scoring='neg_mean_absolute_error', 
             n_jobs=-1, 
             verbose=2, 
