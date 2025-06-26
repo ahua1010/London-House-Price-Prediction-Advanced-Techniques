@@ -57,7 +57,7 @@ st.set_page_config(layout="wide", page_title="倫敦房價視覺化")
 st.title('倫敦房價互動式 3D 地圖')
 
 # 重要的修正：從舊檔案或直接寫入您的 API KEY
-MAPBOX_API_KEY = "pk.eyJ1Ijoia2lraW8zMjE1NiIsImEiOiJjbWNhOXAzNmcwMTVsMmhxMGtndHl4YnZ4In0.I71ZLDqNSuOmnDilklRL4w"
+MAPBOX_API_KEY = "Your API KEY"
 
 @st.cache_data
 def load_and_process_data():
