@@ -126,9 +126,4 @@
 
 ## 視覺效果
 此為將預測結果視覺化之展示，用於 Demo
-
-```HTML
-<video width="320" height="240" controls>
-    <source src="/img/visable.mp4" type="video/mp4">
-</video>
-```
+![視覺效果(/img/demo.png)](https://github.com/ahua1010/London-House-Price-Prediction-Advanced-Techniques/blob/main/img/visable.mp4)
