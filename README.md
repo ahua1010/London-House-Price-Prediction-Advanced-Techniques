@@ -126,4 +126,7 @@
 
 ## 視覺效果
 此為將預測結果視覺化之展示，用於 Demo
-[![視覺效果](/img/demo.png)](https://github.com/ahua1010/London-House-Price-Prediction-Advanced-Techniques/blob/main/img/visable.mp4)
+
+https://github.com/user-attachments/assets/2e493901-0b06-490d-97bd-31258603d976
+
+
